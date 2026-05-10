@@ -1,0 +1,26 @@
+{
+  "name": "chattist-server",
+  "version": "1.0.0",
+  "description": "Chattist — privaatne vestlusserveri backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^9.4.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.18.3",
+    "express-rate-limit": "^8.3.2",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "uuid": "^9.0.1",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
