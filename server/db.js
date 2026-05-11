@@ -152,8 +152,9 @@ if (!dmCols.includes('expires_at'))   db.exec("ALTER TABLE dm_messages ADD COLUM
 // Ensure default "general" group exists
 const defaultGroup = db.prepare("SELECT id FROM groups WHERE name = 'general' LIMIT 1").get();
 if (!defaultGroup) {
-  db.prepare("INSERT INTO groups (id, name, password_hash, created_by) VALUES (?, 'general', NULL, NULL)")
-    .run(uuidv4());
+  const crypto = require('crypto');
+  db.prepare("INSERT INTO groups (id, name, password_hash, created_by, salt) VALUES (?, 'general', NULL, NULL, ?)")
+    .run(uuidv4(), crypto.randomBytes(16).toString('hex'));
 }
 
 const MSG_TTL = 24 * 60 * 60 * 1000;

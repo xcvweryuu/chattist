@@ -51,12 +51,19 @@ function checkGroupAccess(req, res, next) {
 
   try {
     const membership = db.prepare('SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?').get(groupId, userId);
-    if (!membership) {
-      // Check if group has a password. If not, maybe auto-join? 
-      // For now, strictly require membership/password unlock.
-      return res.status(403).json({ error: 'Access denied. You are not a member of this group.' });
+    if (membership) return next();
+
+    // Not a member? Check if the group is public (no password)
+    const group = db.prepare('SELECT password_hash FROM groups WHERE id = ?').get(groupId);
+    if (!group) return res.status(404).json({ error: 'Group not found.' });
+
+    if (!group.password_hash) {
+      // Auto-join public group
+      db.prepare('INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)').run(groupId, userId);
+      return next();
     }
-    next();
+
+    return res.status(403).json({ error: 'Access denied. You are not a member of this group.' });
   } catch (e) {
     res.status(500).json({ error: 'Server error during authorization.' });
   }
