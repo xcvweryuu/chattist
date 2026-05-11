@@ -66,7 +66,6 @@ router.post('/register', async (req, res) => {
     setRefreshCookie(res, id, u);
     res.json({ token, username: u, id });
   } catch (e) {
-    console.error('[auth] register error');
     res.status(500).json({ error: 'Server error.' });
   }
 });

@@ -111,16 +111,24 @@ router.patch('/:id', authMiddleware, (req, res) => {
 
 // DELETE burn message
 router.delete('/my/:groupId', authMiddleware, (req, res) => {
-  const result = db.prepare('DELETE FROM messages WHERE group_id = ? AND user_id = ?').run(req.params.groupId, req.user.id);
-  res.json({ success: true, deleted: result.changes });
+  try {
+    const result = db.prepare('DELETE FROM messages WHERE group_id = ? AND user_id = ?').run(req.params.groupId, req.user.id);
+    res.json({ success: true, deleted: result.changes });
+  } catch (e) {
+    res.status(500).json({ error: 'Server error.' });
+  }
 });
 
 router.delete('/:id', authMiddleware, (req, res) => {
-  const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(req.params.id);
-  if (!msg) return res.status(404).json({ error: 'Message not found.' });
-  if (msg.user_id !== req.user.id) return res.status(403).json({ error: 'Not your message.' });
-  db.prepare('DELETE FROM messages WHERE id = ?').run(req.params.id);
-  res.json({ success: true, id: req.params.id });
+  try {
+    const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(req.params.id);
+    if (!msg) return res.status(404).json({ error: 'Message not found.' });
+    if (msg.user_id !== req.user.id) return res.status(403).json({ error: 'Not your message.' });
+    db.prepare('DELETE FROM messages WHERE id = ?').run(req.params.id);
+    res.json({ success: true, id: req.params.id });
+  } catch (e) {
+    res.status(500).json({ error: 'Server error.' });
+  }
 });
 
 module.exports = router;

@@ -8,10 +8,14 @@ const { authMiddleware } = require('../middleware/auth');
 const router = express.Router();
 
 router.get('/', authMiddleware, (req, res) => {
-  const groups = db.prepare(
-    'SELECT id, name, (password_hash IS NOT NULL) as has_password, salt, created_at, created_by FROM groups ORDER BY created_at ASC'
-  ).all();
-  res.json(groups);
+  try {
+    const groups = db.prepare(
+      'SELECT id, name, (password_hash IS NOT NULL) as has_password, salt, created_at, created_by FROM groups ORDER BY created_at ASC'
+    ).all();
+    res.json(groups);
+  } catch (e) {
+    res.status(500).json({ error: 'Server error.' });
+  }
 });
 
 router.post('/', authMiddleware, async (req, res) => {

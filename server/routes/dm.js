@@ -7,20 +7,24 @@ const router = express.Router();
 
 // GET conversations list
 router.get('/', authMiddleware, (req, res) => {
-  const now = Date.now();
-  const defaultCutoff = now - MSG_TTL;
-  const convos = db.prepare(`
-    SELECT
-      CASE WHEN sender_id = ? THEN receiver_id   ELSE sender_id   END AS other_id,
-      CASE WHEN sender_id = ? THEN receiver_name ELSE sender_name END AS other_name,
-      MAX(created_at) as last_msg_time
-    FROM dm_messages
-    WHERE (sender_id = ? OR receiver_id = ?)
-      AND ((expires_at IS NOT NULL AND expires_at > ?) OR (expires_at IS NULL AND created_at > ?))
-    GROUP BY other_id, other_name
-    ORDER BY last_msg_time DESC
-  `).all(req.user.id, req.user.id, req.user.id, req.user.id, now, defaultCutoff);
-  res.json(convos);
+  try {
+    const now = Date.now();
+    const defaultCutoff = now - MSG_TTL;
+    const convos = db.prepare(`
+      SELECT
+        CASE WHEN sender_id = ? THEN receiver_id   ELSE sender_id   END AS other_id,
+        CASE WHEN sender_id = ? THEN receiver_name ELSE sender_name END AS other_name,
+        MAX(created_at) as last_msg_time
+      FROM dm_messages
+      WHERE (sender_id = ? OR receiver_id = ?)
+        AND ((expires_at IS NOT NULL AND expires_at > ?) OR (expires_at IS NULL AND created_at > ?))
+      GROUP BY other_id, other_name
+      ORDER BY last_msg_time DESC
+    `).all(req.user.id, req.user.id, req.user.id, req.user.id, now, defaultCutoff);
+    res.json(convos);
+  } catch (e) {
+    res.status(500).json({ error: 'Server error.' });
+  }
 });
 
 function getOrCreateDmSalt(id1, id2) {
@@ -48,7 +52,6 @@ router.get('/:userId', authMiddleware, (req, res) => {
       ORDER BY created_at ASC LIMIT 200
     `).all(req.user.id, req.params.userId, req.params.userId, req.user.id, now, defaultCutoff);
 
-    // Side-effect free GET: filter messages that are read-once and already read by the receiver
     const userId = req.user.id;
     const filtered = msgs.filter(m => {
       if (!m.read_once) return true;
@@ -56,7 +59,6 @@ router.get('/:userId', authMiddleware, (req, res) => {
       return !m.is_read;
     });
 
-    // BUG FIX: Include DM-specific salt
     const salt = getOrCreateDmSalt(req.user.id, req.params.userId);
     res.json({ messages: filtered, salt });
   } catch (e) {
@@ -64,7 +66,7 @@ router.get('/:userId', authMiddleware, (req, res) => {
   }
 });
 
-// POST mark DM as read (for read-once logic)
+// POST mark DM as read
 router.post('/read/:id', authMiddleware, (req, res) => {
   try {
     const userId = req.user.id;
@@ -86,10 +88,14 @@ router.post('/read/:id', authMiddleware, (req, res) => {
 
 // GET blocked users list
 router.get('/blocked', authMiddleware, (req, res) => {
-  const rows = db.prepare(
-    'SELECT u.id, u.username FROM blocked_users b JOIN users u ON u.id = b.blocked_id WHERE b.blocker_id = ?'
-  ).all(req.user.id);
-  res.json(rows);
+  try {
+    const rows = db.prepare(
+      'SELECT u.id, u.username FROM blocked_users b JOIN users u ON u.id = b.blocked_id WHERE b.blocker_id = ?'
+    ).all(req.user.id);
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: 'Server error.' });
+  }
 });
 
 // POST block a user
@@ -103,8 +109,12 @@ router.post('/block/:userId', authMiddleware, (req, res) => {
 
 // DELETE unblock a user
 router.delete('/block/:userId', authMiddleware, (req, res) => {
-  db.prepare('DELETE FROM blocked_users WHERE blocker_id = ? AND blocked_id = ?').run(req.user.id, req.params.userId);
-  res.json({ success: true });
+  try {
+    db.prepare('DELETE FROM blocked_users WHERE blocker_id = ? AND blocked_id = ?').run(req.user.id, req.params.userId);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Server error.' });
+  }
 });
 
 // POST new DM
@@ -114,11 +124,12 @@ router.post('/:userId', authMiddleware, (req, res) => {
     if (!content) return res.status(400).json({ error: 'Message cannot be empty.' });
     const receiver = db.prepare('SELECT id, username FROM users WHERE id = ?').get(req.params.userId);
     if (!receiver) return res.status(404).json({ error: 'User not found.' });
-    // Check if either party has blocked the other
+    
     const blocked = db.prepare(
       'SELECT 1 FROM blocked_users WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)'
     ).get(req.user.id, receiver.id, receiver.id, req.user.id);
     if (blocked) return res.status(403).json({ error: 'This conversation is blocked.' });
+
     const id = uuidv4();
     const now = Date.now();
     const readOnce = read_once ? 1 : 0;
@@ -154,11 +165,15 @@ router.patch('/:id', authMiddleware, (req, res) => {
 
 // DELETE burn DM
 router.delete('/:id', authMiddleware, (req, res) => {
-  const msg = db.prepare('SELECT * FROM dm_messages WHERE id = ?').get(req.params.id);
-  if (!msg) return res.status(404).json({ error: 'Message not found.' });
-  if (msg.sender_id !== req.user.id) return res.status(403).json({ error: 'Not your message.' });
-  db.prepare('DELETE FROM dm_messages WHERE id = ?').run(req.params.id);
-  res.json({ success: true, id: req.params.id });
+  try {
+    const msg = db.prepare('SELECT * FROM dm_messages WHERE id = ?').get(req.params.id);
+    if (!msg) return res.status(404).json({ error: 'Message not found.' });
+    if (msg.sender_id !== req.user.id) return res.status(403).json({ error: 'Not your message.' });
+    db.prepare('DELETE FROM dm_messages WHERE id = ?').run(req.params.id);
+    res.json({ success: true, id: req.params.id });
+  } catch (e) {
+    res.status(500).json({ error: 'Server error.' });
+  }
 });
 
 module.exports = router;

@@ -13,12 +13,16 @@ const rateLimit    = require('express-rate-limit');
 const { WebSocketServer } = require('ws');
 const jwt        = require('jsonwebtoken');
 
+require('dotenv').config();
+
 const { JWT_SECRET } = require('./middleware/auth');
-const { db } = require('./db'); // BUG FIX: Moved to top level
+const { db } = require('./db');
+const sanitizeMiddleware = require('./middleware/sanitize');
 
 // ── App ──
 const app    = express();
-app.set('revokeSession', revokeSession); // SECURITY FIX: Expose for routes
+app.set('revokeSession', revokeSession);
+app.set('trust proxy', 1); // Trust first proxy
 const server = http.createServer(app);
 const PORT   = process.env.PORT || 3000;
 app.disable('x-powered-by');
@@ -28,7 +32,7 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc:  ["'self'"], // SECURITY FIX: Removed 'unsafe-inline'
+      scriptSrc:  ["'self'"],
       styleSrc:   ["'self'", "'unsafe-inline'"],
       fontSrc:    ["'self'"],
       connectSrc: ["'self'", "ws:", "wss:"],
@@ -44,14 +48,16 @@ app.use(helmet({
 }));
 
 // ── Middleware ──
-app.use(cors({ origin: 'https://yourdomain.com', credentials: true }));
+const corsOrigin = process.env.CORS_ORIGIN || true;
+app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(cookieParser());
 app.use(express.json());
+app.use(sanitizeMiddleware);
 
 // ── Rate Limiting ──
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 min
-  max: 10,                   // Max 10 attempts
+  windowMs: 15 * 60 * 1000,
+  max: 10,
   message: { error: 'Too many requests. Try again in 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -60,16 +66,13 @@ app.use('/api/auth/login',    authLimiter);
 app.use('/api/auth/register', authLimiter);
 
 const apiLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000,  // 1 min
-  max: 120,                  // 120 requests per minute
+  windowMs: 1 * 60 * 1000,
+  max: 120,
   message: { error: 'Too many requests.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
 app.use('/api/', apiLimiter);
-
-// Serve frontend static files
-app.use(express.static(path.join(__dirname, '..')));
 
 // ── API routes ──
 app.use('/api/auth',     require('./routes/auth'));
@@ -77,9 +80,20 @@ app.use('/api/groups',   require('./routes/groups'));
 app.use('/api/messages', require('./routes/messages'));
 app.use('/api/dm',       require('./routes/dm'));
 
+// Serve frontend static files
+app.use(express.static(path.join(__dirname, '..')));
+
 // All other requests → index.html (SPA)
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'index.html'));
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  if (process.env.NODE_ENV !== 'production') {
+    console.error('[error]', err);
+  }
+  res.status(500).json({ error: 'Internal server error.' });
 });
 
 // ════════════════════════════════════════════
@@ -143,7 +157,6 @@ wss.on('close', () => clearInterval(interval));
 
 wss.on('connection', (ws) => {
   let authed = false;
-  // SECURITY FIX: WS rate limiting
   const quota = { count: 0, reset: Date.now() + 5000 };
   clients.set(ws, { userId: null, username: null, rooms: new Set(), isAlive: true });
 
@@ -152,7 +165,6 @@ wss.on('connection', (ws) => {
     if (info) info.isAlive = true;
   });
 
-  // Auth timeout: 10s
   const authTimeout = setTimeout(() => {
     if (!authed) {
       ws.send(JSON.stringify({ type: 'error', message: 'Authentication timed out.' }));
@@ -161,7 +173,6 @@ wss.on('connection', (ws) => {
   }, 10000);
 
   ws.on('message', (raw) => {
-    // SECURITY FIX: Rate limiting (max 20 events per 5s)
     if (Date.now() > quota.reset) {
       quota.count = 0;
       quota.reset = Date.now() + 5000;
@@ -175,25 +186,22 @@ wss.on('connection', (ws) => {
     try { msg = JSON.parse(raw); }
     catch { return; }
 
-    // ── AUTH ──
     if (msg.type === 'auth') {
       try {
         const payload = jwt.verify(msg.token, JWT_SECRET);
         if (payload.typ === 'refresh') throw new Error('no refresh over ws');
         
-        // SECURITY FIX: Token blacklisting check
         const blacklisted = db.prepare('SELECT 1 FROM jti_blacklist WHERE jti = ?').get(payload.jti);
         if (blacklisted) throw new Error('token blacklisted');
 
         const info = clients.get(ws);
         info.userId = payload.id;
         info.username = payload.username;
-        info.jti = payload.jti; // Store jti to enable revocation
+        info.jti = payload.jti;
         authed = true;
         
         clearTimeout(authTimeout);
         ws.send(JSON.stringify({ type: 'auth_ok', username: payload.username }));
-        if (process.env.CHATTIST_DEBUG === '1') console.log('[ws] auth ok');
       } catch {
         ws.send(JSON.stringify({ type: 'error', message: 'Invalid token.' }));
         ws.close();
@@ -204,18 +212,12 @@ wss.on('connection', (ws) => {
     if (!authed || !clients.has(ws)) return;
     const clientInfo = clients.get(ws);
 
-    // ── JOIN GROUP ──
     if (msg.type === 'join_group') {
       const groupId = msg.groupId;
       const group = db.prepare('SELECT id, password_hash FROM groups WHERE id = ?').get(groupId);
-      if (!group) {
-        return ws.send(JSON.stringify({ type: 'error', message: 'Group not found.' }));
-      }
+      if (!group) return ws.send(JSON.stringify({ type: 'error', message: 'Group not found.' }));
 
-      // Verify membership
       let membership = db.prepare('SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?').get(groupId, clientInfo.userId);
-      
-      // If not a member but group is public, auto-join
       if (!membership && !group.password_hash) {
         db.prepare('INSERT INTO group_members (group_id, user_id) VALUES (?, ?)').run(groupId, clientInfo.userId);
         membership = true;
@@ -233,14 +235,11 @@ wss.on('connection', (ws) => {
       }
     }
 
-    // ── LEAVE GROUP ──
     if (msg.type === 'leave_group') {
       removeFromRoom('group:' + msg.groupId, ws);
     }
 
-    // ── JOIN DM ROOM ──
     if (msg.type === 'join_dm') {
-      // SECURITY FIX: DM IDOR protection
       if (!msg.otherId || msg.otherId === clientInfo.userId) {
         return ws.send(JSON.stringify({ type: 'error', message: 'Invalid DM target.' }));
       }
@@ -251,10 +250,8 @@ wss.on('connection', (ws) => {
       addToRoom(dmRoom, ws);
     }
 
-    // ── GROUP MESSAGE ──
     if (msg.type === 'group_message') {
       if (!msg.id || !msg.groupId || !msg.content) return;
-      // Double check membership for message broadcasting
       if (clientInfo.rooms.has('group:' + msg.groupId)) {
         broadcast('group:' + msg.groupId, {
           type:       'group_message',
@@ -268,11 +265,8 @@ wss.on('connection', (ws) => {
       }
     }
 
-    // ── DM MESSAGE ──
     if (msg.type === 'dm_message') {
       if (!msg.id || !msg.receiverId || !msg.content) return;
-      
-      // SECURITY FIX: Block check before DM
       const blocked = db.prepare(
         'SELECT 1 FROM blocked_users WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)'
       ).get(clientInfo.userId, msg.receiverId, msg.receiverId, clientInfo.userId);
@@ -296,9 +290,7 @@ wss.on('connection', (ws) => {
       broadcast(dmRoom, data, ws);
     }
 
-    // ── BURN MESSAGE ──
     if (msg.type === 'burn_message') {
-      // SECURITY FIX: Authorization check for message burning
       const msgRow = db.prepare('SELECT user_id, group_id FROM messages WHERE id = ?').get(msg.id) 
                   || db.prepare('SELECT sender_id as user_id FROM dm_messages WHERE id = ?').get(msg.id);
       
@@ -318,11 +310,10 @@ wss.on('connection', (ws) => {
           groupId: msg.groupId
         });
       } else {
-        ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized to delete this message.' }));
+        ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized.' }));
       }
     }
 
-    // ── MESSAGE EDITED ──
     if (msg.type === 'message_edited') {
       if (!msg.id || !msg.groupId || !msg.content) return;
       if (clientInfo.rooms.has('group:' + msg.groupId)) {
@@ -336,11 +327,9 @@ wss.on('connection', (ws) => {
       }
     }
 
-    // ── DM EDITED ──
     if (msg.type === 'dm_message_edited') {
       if (!msg.id || !msg.receiverId || !msg.content) return;
       const dmRoom = getDmRoom(clientInfo.userId, msg.receiverId);
-      // BUG FIX: Broadcast to all participant sessions
       broadcast(dmRoom, {
         type:      'dm_message_edited',
         id:        msg.id,
@@ -349,7 +338,6 @@ wss.on('connection', (ws) => {
       });
     }
 
-    // ── DM VIEWED (read receipt) ──
     if (msg.type === 'dm_viewed') {
       if (!msg.otherId) return;
       db.prepare('UPDATE dm_messages SET is_read = 1 WHERE sender_id = ? AND receiver_id = ?')
@@ -357,7 +345,6 @@ wss.on('connection', (ws) => {
       sendTo(msg.otherId, { type: 'dm_read', receiverId: clientInfo.userId });
     }
 
-    // ── TYPING INDICATOR ──
     if (msg.type === 'typing') {
       if (clientInfo.rooms.has('group:' + msg.groupId)) {
         broadcast('group:' + msg.groupId, {
@@ -372,7 +359,6 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     const info = clients.get(ws);
     if (info) {
-      if (process.env.CHATTIST_DEBUG === '1') console.log('[ws] closed');
       for (const roomId of info.rooms) {
         if (roomId.startsWith('group:')) {
           broadcast(roomId, { type: 'user_left', username: info.username });
@@ -384,9 +370,7 @@ wss.on('connection', (ws) => {
     clearTimeout(authTimeout);
   });
 
-  ws.on('error', (e) => {
-    if (process.env.CHATTIST_DEBUG === '1') console.error('[ws] error:', e.message);
-  });
+  ws.on('error', (e) => {});
 });
 
 function getDmRoom(id1, id2) {
@@ -404,7 +388,9 @@ function revokeSession(jti) {
 
 // ── Start ──
 server.listen(PORT, () => {
-  console.log(`chattist listening on ${PORT} (set CHATTIST_DEBUG=1 for verbose logs)`);
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`chattist listening on ${PORT}`);
+  }
 });
 
 module.exports = { app, server, revokeSession };

@@ -154,7 +154,6 @@ const defaultGroup = db.prepare("SELECT id FROM groups WHERE name = 'general' LI
 if (!defaultGroup) {
   db.prepare("INSERT INTO groups (id, name, password_hash, created_by) VALUES (?, 'general', NULL, NULL)")
     .run(uuidv4());
-  if (process.env.CHATTIST_DEBUG === '1') console.log('[db] default group "general" created.');
 }
 
 const MSG_TTL = 24 * 60 * 60 * 1000;
@@ -177,10 +176,7 @@ function cleanOldMessages() {
     return r1.changes + r2.changes;
   });
 
-  const totalChanges = deleteExpired();
-  if (totalChanges > 0) {
-    console.log(`[db] Deleted ${totalChanges} expired messages.`);
-  }
+  deleteExpired();
 }
 
 const INACTIVE_MS = 90 * 24 * 60 * 60 * 1000;
@@ -204,12 +200,8 @@ function purgeInactiveAccounts() {
   });
 
   try {
-    const n = deleteStale(stale);
-    if (n > 0 && process.env.CHATTIST_DEBUG === '1') {
-      console.log('[db] Purged inactive accounts:', n);
-    }
+    deleteStale(stale);
   } catch (e) {
-    console.error('[db] Error purging inactive accounts:', e.message);
   }
 }
 
