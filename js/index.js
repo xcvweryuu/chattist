@@ -52,6 +52,11 @@ document.addEventListener('DOMContentLoaded', function () {
   if (tabLoginBtn) tabLoginBtn.addEventListener('click', function() { switchTab('login'); });
   if (tabRegBtn) tabRegBtn.addEventListener('click', function() { switchTab('register'); });
 
+  // Handle direct /register path by switching tab on load
+  if (window.location.pathname === '/register' || window.location.pathname === '/register/') {
+    switchTab('register');
+  }
+
   // Password show/hide
   function togglePwd(id, btn) {
     var inp = document.getElementById(id);

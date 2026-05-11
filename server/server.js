@@ -83,6 +83,11 @@ app.use('/api/dm',       require('./routes/dm'));
 // Serve frontend static files
 app.use(express.static(path.join(__dirname, '..')));
 
+// Specific route for /register to avoid 404 (handled by index.html tabs)
+app.get('/register', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'index.html'));
+});
+
 // All other requests → index.html (SPA)
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'index.html'));
