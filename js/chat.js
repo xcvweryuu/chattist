@@ -281,6 +281,7 @@ async function loadGroups() {
       if (!cur) selectNoChat();
       else {
         currentGroupCreatedBy = cur.created_by || null;
+        currentGroupSalt = cur.salt || null;
         updateDeleteGroupBtn();
       }
     }
@@ -300,7 +301,9 @@ async function tryOpenGroup(g) {
     document.getElementById('group-pw-input').value = '';
     document.getElementById('group-pw-modal').classList.remove('hidden');
     setTimeout(function() { document.getElementById('group-pw-input').focus(); }, 50);
-  } else { openGroup(g.id, g.name, g.created_by); }
+  } else { 
+    await openGroup(g.id, g.name, g.created_by, g.salt); 
+  }
 }
 
 async function submitGroupPassword() {
@@ -685,30 +688,47 @@ async function doSendMessage() {
   if (!input) return;
   var text=input.value.trim();
   if (!text||!currentId) return;
+  
   var readOnce=document.getElementById('read-once-check').checked;
   var ttlMinutes=document.getElementById('expiry-select').value || null;
   var rId=replyTo?replyTo.id:null, rAuthor=replyTo?replyTo.author:null, rPreview=replyTo?replyTo.preview:null;
+  
   try {
     var user=getCurrentUser();
     var encrypted;
+    
     if (currentMode==='group') {
+      // Defensive check for salt
+      if (!currentGroupSalt) {
+        await loadGroups();
+        if (!currentGroupSalt) throw new Error('Encryption salt missing. Please try reloading the page.');
+      }
       encrypted=await encryptMessage(text, currentId, currentGroupSalt);
     } else {
+      // DMs always have their salt loaded by getDmMessages during openDm
+      if (!currentDmSalt) throw new Error('Direct message encryption not initialized.');
       encrypted=await encryptDmMessage(text, user.id, currentId, currentDmSalt);
     }
-    input.value=''; input.style.height='auto'; cancelReply();
+
+    input.value=''; 
+    input.style.height='auto'; 
+    cancelReply();
+
     var msg;
     if (currentMode==='group') {
       msg=await postMessage(currentId, encrypted, readOnce, rId, rPreview, rAuthor, ttlMinutes);
       wsSendGroupMessage(msg.id, currentId, encrypted, msg.created_at);
-      appendSingleMessage(msg);
+      await appendSingleMessage(msg);
     } else {
       msg=await postDmMessage(currentId, encrypted, readOnce, rId, rPreview, rAuthor, ttlMinutes);
       wsSendDmMessage(msg.id, currentId, currentName, encrypted, msg.created_at);
       loadDmList();
-      appendSingleMessage(msg);
+      await appendSingleMessage(msg);
     }
-  } catch(e) { showToast('Error: '+e.message); }
+  } catch(e) { 
+    console.error('Send failed:', e);
+    showToast('Error: '+e.message); 
+  }
 }
 
 async function doBurnMessage(msgId) {
