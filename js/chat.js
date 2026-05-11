@@ -323,13 +323,15 @@ function closeGroupPwModal() {
   pendingGroupId=null;
 }
 
-function openGroup(id, name, createdBy, salt) {
+async function openGroup(id, name, createdBy, salt) {
   if (currentMode==='group' && currentId) wsLeaveGroup(currentId);
   currentMode='group'; currentId=id; currentName=name;
   currentGroupCreatedBy = createdBy !== undefined ? (createdBy || null) : null;
-  // BUG FIX: Store salt for encryption
-  currentGroupSalt = salt || null;
-  messageMap.clear(); // Clear map on chat switch
+  
+  // Clear map and UI on chat switch
+  messageMap.clear();
+  const area = document.getElementById('messages-area');
+  if (area) area.innerHTML = '';
   
   document.getElementById('current-group-name').textContent='#'+name;
   document.getElementById('current-group-meta').textContent='AES-256 encrypted';
@@ -340,19 +342,25 @@ function openGroup(id, name, createdBy, salt) {
   document.getElementById('block-btn').classList.add('hidden');
   document.getElementById('invite-btn').classList.remove('hidden');
   
-  wsJoinGroup(id); loadGroups(); renderMessages();
-  updateDeleteGroupBtn();
-  
-  if (createdBy === undefined || !salt) {
-    getGroups().then(function(arr) {
-      var g = Array.isArray(arr) && arr.find(function(x) { return x.id === id; });
-      if (g && currentId === id) {
+  wsJoinGroup(id); 
+  loadGroups(); 
+
+  // BUG FIX: Ensure we have the salt before rendering to avoid [decryption failed]
+  if (salt) {
+    currentGroupSalt = salt;
+  } else {
+    try {
+      const arr = await getGroups();
+      const g = Array.isArray(arr) && arr.find(x => x.id === id);
+      if (g) {
         currentGroupCreatedBy = g.created_by || null;
         currentGroupSalt = g.salt || null;
-        updateDeleteGroupBtn();
       }
-    });
+    } catch (e) { console.error('Failed to load group salt:', e); }
   }
+
+  await renderMessages();
+  updateDeleteGroupBtn();
 }
 
 function openCreateGroup() {
@@ -415,10 +423,14 @@ async function loadDmList() {
   }
 }
 
-function openDm(userId, username) {
+async function openDm(userId, username) {
   currentMode='dm'; currentId=userId; currentName=username;
-  currentDmSalt = null; // Will be loaded by renderMessages -> getDmMessages
+  currentDmSalt = null; 
+  
+  // Clear map and UI on chat switch
   messageMap.clear();
+  const area = document.getElementById('messages-area');
+  if (area) area.innerHTML = '';
 
   var isBlocked = blockedUsers.has(userId);
   document.getElementById('current-group-name').textContent='@ '+username;
@@ -430,8 +442,12 @@ function openDm(userId, username) {
   document.getElementById('block-btn').title = isBlocked ? 'Unblock user' : 'Block user';
   document.getElementById('block-btn').style.color = isBlocked ? 'var(--danger)' : '';
   document.getElementById('invite-btn').classList.add('hidden');
+  
   updateDeleteGroupBtn();
-  wsJoinDm(userId); loadDmList(); renderMessages();
+  wsJoinDm(userId); 
+  loadDmList(); 
+  
+  await renderMessages();
 }
 
 // ── USER MODAL ──
@@ -534,9 +550,8 @@ async function renderMessages() {
   
   var isBottom=area.scrollHeight-area.clientHeight<=area.scrollTop+80;
   
-  // BUG FIX: Efficient rendering (Fix 10)
   if (!msgs||!msgs.length) {
-    area.querySelectorAll('.msg-row').forEach(function(el){ el.remove(); });
+    area.innerHTML = '';
     messageMap.clear();
     var el=document.createElement('div'); el.className='msg-row no-messages';
     var span = document.createElement('span');
@@ -571,6 +586,26 @@ async function renderMessages() {
   if (isBottom) area.scrollTop=area.scrollHeight;
   // Notify sender that we've read their DMs
   if (currentMode==='dm' && prefsReadReceiptsEnabled()) wsDmViewed(currentId);
+}
+
+/** Append a single message from WebSocket or Send action */
+async function appendSingleMessage(msg) {
+  if (messageMap.has(msg.id)) return;
+  var area = document.getElementById('messages-area');
+  if (!area) return;
+
+  var isBottom = area.scrollHeight - area.clientHeight <= area.scrollTop + 100;
+  
+  // Remove empty state if present
+  var emptyRow = area.querySelector('.no-messages');
+  if (emptyRow) emptyRow.remove();
+
+  var user = getCurrentUser();
+  var row = await buildMsgRow(msg, user);
+  area.appendChild(row);
+  messageMap.set(msg.id, row);
+
+  if (isBottom) area.scrollTop = area.scrollHeight;
 }
 
 async function buildMsgRow(msg, user) {
@@ -619,10 +654,6 @@ async function buildMsgRow(msg, user) {
     var badge=document.createElement('span'); badge.className='read-once-badge'; badge.textContent='VIEW ONCE';
     footer.appendChild(badge);
   }
-  var meta=document.createElement('span'); meta.className='msg-meta';
-  var expiryText = msg.expires_at ? fmtExpiry(null, msg.expires_at) : fmtExpiry(msg.created_at, null);
-  meta.textContent=fmtTime(msg.created_at)+' · '+expiryText;
-  footer.appendChild(meta);
   if (msg.edited) {
     var editedLbl=document.createElement('span'); editedLbl.className='msg-edited'; editedLbl.textContent='edited';
     footer.appendChild(editedLbl);
@@ -670,12 +701,13 @@ async function doSendMessage() {
     if (currentMode==='group') {
       msg=await postMessage(currentId, encrypted, readOnce, rId, rPreview, rAuthor, ttlMinutes);
       wsSendGroupMessage(msg.id, currentId, encrypted, msg.created_at);
+      appendSingleMessage(msg);
     } else {
       msg=await postDmMessage(currentId, encrypted, readOnce, rId, rPreview, rAuthor, ttlMinutes);
       wsSendDmMessage(msg.id, currentId, currentName, encrypted, msg.created_at);
       loadDmList();
+      appendSingleMessage(msg);
     }
-    renderMessages();
   } catch(e) { showToast('Error: '+e.message); }
 }
 
@@ -684,7 +716,13 @@ async function doBurnMessage(msgId) {
   var result=currentMode==='group'?await burnMessage(msgId):await burnDmMessage(msgId);
   if (result.success) {
     if (currentMode==='group') wsBurnMessage(msgId, currentId);
-    renderMessages(); showToast('Deleted.');
+    // Optimization: find and remove from DOM immediately
+    const row = messageMap.get(msgId);
+    if (row) {
+      row.remove();
+      messageMap.delete(msgId);
+    }
+    showToast('Deleted.');
   } else showToast('Error: '+result.error);
 }
 
@@ -692,7 +730,11 @@ async function doDeleteMyMsgs() {
   if (currentMode!=='group'||!currentId) { showToast('Select a group first.'); return; }
   if (!confirm('Delete ALL your messages from #'+currentName+'?')) return;
   var result=await deleteMyMessages(currentId);
-  if (result.success) { renderMessages(); showToast('Deleted.'); }
+  if (result.success) { 
+    // We can re-render for this batch operation
+    renderMessages(); 
+    showToast('Deleted.'); 
+  }
   else showToast('Error: '+result.error);
 }
 
@@ -710,14 +752,17 @@ function onWsGroupMessage(msg) {
   var user=getCurrentUser();
   if (currentMode!=='group'||currentId!==msg.groupId) return;
   if (msg.userId===user.id||msg.user_id===user.id) return;
-  playNotif(); renderMessages();
+  playNotif(); 
+  appendSingleMessage(msg);
 }
 function onWsDmMessage(msg) {
   var user=getCurrentUser();
   if (currentMode!=='dm') { loadDmList(); playNotif(); return; }
   var other=msg.senderId===user.id?msg.receiverId:msg.senderId;
   if (other!==currentId) { loadDmList(); playNotif(); return; }
-  playNotif(); renderMessages(); loadDmList();
+  playNotif(); 
+  appendSingleMessage(msg); 
+  loadDmList();
 }
 function onWsBurnMessage(msg) {
   if (currentMode!=='group'||currentId!==msg.groupId) return;
@@ -835,14 +880,4 @@ function toggleSidebar() {
   if (sb) sb.classList.toggle('collapsed');
   var btn = document.getElementById('mobile-menu-btn');
   if (btn && sb) btn.setAttribute('aria-expanded', sb.classList.contains('collapsed') ? 'false' : 'true');
-}
-function fmtTime(ts)     { return new Date(ts).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}); }
-function fmtExpiry(created_at, expires_at) {
-  var d;
-  if (expires_at) { d = expires_at - Date.now(); }
-  else { d = 24*3600*1000 - (Date.now() - created_at); }
-  if (d<=0) return 'expired';
-  var h=Math.floor(d/3600000), m=Math.floor((d%3600000)/60000);
-  if (h >= 24) return '24h';
-  return h>0?h+'h '+m+'m':m+'m';
 }
