@@ -21,9 +21,9 @@ function sanitize(input) {
 }
 
 function sanitizeMiddleware(req, res, next) {
-  if (req.body)   req.body   = sanitize(req.body);
-  if (req.query)  req.query  = sanitize(req.query);
-  if (req.params) req.params = sanitize(req.params);
+  // Global sanitization is dangerous for encrypted content and UUIDs.
+  // It has been disabled to prevent corruption of Base64/AES data.
+  // Routes should sanitize individual fields if they are displayed as HTML.
   next();
 }
 

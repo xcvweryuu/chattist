@@ -327,43 +327,46 @@ function closeGroupPwModal() {
 }
 
 async function openGroup(id, name, createdBy, salt) {
-  if (currentMode==='group' && currentId) wsLeaveGroup(currentId);
-  currentMode='group'; currentId=id; currentName=name;
-  currentGroupCreatedBy = createdBy !== undefined ? (createdBy || null) : null;
-  
-  // Clear map and UI on chat switch
-  messageMap.clear();
-  const area = document.getElementById('messages-area');
-  if (area) area.innerHTML = '';
-  
-  document.getElementById('current-group-name').textContent='#'+name;
-  document.getElementById('current-group-meta').textContent='AES-256 encrypted';
-  document.getElementById('empty-state').style.display='none';
-  document.getElementById('msg-input').disabled=false;
-  document.getElementById('send-btn').disabled=false;
-  document.getElementById('msg-input').placeholder='Message #'+name+'...';
-  document.getElementById('block-btn').classList.add('hidden');
-  document.getElementById('invite-btn').classList.remove('hidden');
-  
-  wsJoinGroup(id); 
-  loadGroups(); 
+  try {
+    if (currentMode==='group' && currentId) wsLeaveGroup(currentId);
+    currentMode='group'; currentId=id; currentName=name;
+    currentGroupCreatedBy = createdBy || null;
+    
+    // UI: Enable input immediately so user can type while history loads
+    const input = document.getElementById('msg-input');
+    const sendBtn = document.getElementById('send-btn');
+    if (input) { input.disabled = false; input.placeholder = 'Message #'+name+'...'; }
+    if (sendBtn) { sendBtn.disabled = false; }
+    
+    document.getElementById('current-group-name').textContent='#'+name;
+    document.getElementById('current-group-meta').textContent='AES-256 encrypted';
+    document.getElementById('empty-state').style.display='none';
+    document.getElementById('block-btn').classList.add('hidden');
+    document.getElementById('invite-btn').classList.remove('hidden');
 
-  // BUG FIX: Ensure we have the salt before rendering to avoid [decryption failed]
-  if (salt) {
-    currentGroupSalt = salt;
-  } else {
-    try {
+    // Clear map and UI
+    messageMap.clear();
+    const area = document.getElementById('messages-area');
+    if (area) area.innerHTML = '';
+    
+    wsJoinGroup(id); 
+    loadGroups(); 
+
+    // SALT: Critical for encryption
+    if (salt) {
+      currentGroupSalt = salt;
+    } else {
       const arr = await getGroups();
       const g = Array.isArray(arr) && arr.find(x => x.id === id);
-      if (g) {
-        currentGroupCreatedBy = g.created_by || null;
-        currentGroupSalt = g.salt || null;
-      }
-    } catch (e) { console.error('Failed to load group salt:', e); }
-  }
+      if (g) currentGroupSalt = g.salt || null;
+    }
 
-  await renderMessages();
-  updateDeleteGroupBtn();
+    await renderMessages();
+    updateDeleteGroupBtn();
+  } catch (e) {
+    console.error('Failed to open group:', e);
+    showToast('Error opening group chat.');
+  }
 }
 
 function openCreateGroup() {
